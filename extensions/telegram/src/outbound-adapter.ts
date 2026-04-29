@@ -23,8 +23,23 @@ import { resolveTelegramInlineButtons } from "./button-types.js";
 import { markdownToTelegramHtmlChunks } from "./format.js";
 import { parseTelegramReplyToMessageId, parseTelegramThreadId } from "./outbound-params.js";
 import { pinMessageTelegram } from "./send.js";
+import {
+  formatSupergroupViolationBanner,
+  getSupergroupViolation,
+} from "./supergroup-dm-whitelist.js";
+import { parseTelegramTarget } from "./targets.js";
 
 export const TELEGRAM_TEXT_CHUNK_LIMIT = 4000;
+
+export function applySupergroupViolationBanner(to: string, text: string): string {
+  const target = parseTelegramTarget(to);
+  const violation = getSupergroupViolation(target.chatId);
+  if (!violation) {
+    return text;
+  }
+  const banner = formatSupergroupViolationBanner(violation);
+  return text ? `${banner}\n\n${text}` : banner;
+}
 
 type TelegramSendFn = typeof import("./send.js").sendMessageTelegram;
 type TelegramSendOpts = Parameters<TelegramSendFn>[2];
@@ -83,11 +98,12 @@ export async function sendTelegramPayloadMessages(params: {
     | undefined;
   const quoteText =
     typeof telegramData?.quoteText === "string" ? telegramData.quoteText : undefined;
-  const text =
+  const resolvedText =
     resolveInteractiveTextFallback({
       text: params.payload.text,
       interactive: params.payload.interactive,
     }) ?? "";
+  const text = applySupergroupViolationBanner(params.to, resolvedText);
   const mediaUrls = resolvePayloadMediaUrls(params.payload);
   const buttons = resolveTelegramInlineButtons({
     buttons: telegramData?.buttons,
@@ -169,7 +185,7 @@ export const telegramOutbound: ChannelOutboundAdapter = {
         threadId,
         gatewayClientScopes,
       });
-      return await send(to, text, {
+      return await send(to, applySupergroupViolationBanner(to, text), {
         ...baseOpts,
       });
     },
@@ -195,7 +211,7 @@ export const telegramOutbound: ChannelOutboundAdapter = {
         threadId,
         gatewayClientScopes,
       });
-      return await send(to, text, {
+      return await send(to, applySupergroupViolationBanner(to, text), {
         ...baseOpts,
         mediaUrl,
         mediaLocalRoots,

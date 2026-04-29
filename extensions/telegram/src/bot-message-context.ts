@@ -38,6 +38,11 @@ import {
   resolveTelegramReactionVariant,
   resolveTelegramStatusReactionEmojis,
 } from "./status-reaction-variants.js";
+import {
+  evaluateSupergroupDmStatus,
+  getSupergroupDmWhitelist,
+  recordSupergroupViolation,
+} from "./supergroup-dm-whitelist.js";
 import { getTopicName, resolveTopicNameCachePath, updateTopicName } from "./topic-name-cache.js";
 
 export type {
@@ -210,13 +215,37 @@ export const buildTelegramMessageContext = async ({
 
   const threadIdForConfig = resolvedThreadId ?? dmThreadId;
   const { groupConfig, topicConfig } = resolveTelegramGroupConfig(chatId, threadIdForConfig);
-  const directConfig = !isGroup ? (groupConfig as TelegramDirectConfig | undefined) : undefined;
-  const telegramGroupConfig = isGroup
+  // Whitelisted-supergroup DM mode: when (chatId, topicId, senderId) all match
+  // a configured entry, treat the message as a DM (DM access gate, DM session
+  // key, DM context). Mismatches in a whitelisted chat record a sticky
+  // violation that the outbound layer surfaces as a banner.
+  const supergroupDmStatus = evaluateSupergroupDmStatus({
+    chatType: msg.chat.type,
+    chatId,
+    messageThreadId,
+    senderId,
+    whitelist: getSupergroupDmWhitelist(),
+  });
+  if (supergroupDmStatus.kind === "violation") {
+    recordSupergroupViolation({
+      entry: supergroupDmStatus.entry,
+      reason: supergroupDmStatus.reason,
+      violatorId: supergroupDmStatus.violatorId,
+      violatorThreadId: supergroupDmStatus.violatorThreadId,
+    });
+  }
+  const effectiveIsGroup = supergroupDmStatus.kind === "active" ? false : isGroup;
+  const effectiveDmThreadId =
+    supergroupDmStatus.kind === "active" ? (messageThreadId ?? undefined) : dmThreadId;
+  const directConfig = !effectiveIsGroup
+    ? (groupConfig as TelegramDirectConfig | undefined)
+    : undefined;
+  const telegramGroupConfig = effectiveIsGroup
     ? (groupConfig as TelegramGroupConfig | undefined)
     : undefined;
   // Use direct config dmPolicy override if available for DMs
   const effectiveDmPolicy =
-    !isGroup && groupConfig && "dmPolicy" in groupConfig
+    !effectiveIsGroup && groupConfig && "dmPolicy" in groupConfig
       ? (groupConfig.dmPolicy ?? dmPolicy)
       : dmPolicy;
   // Fresh config for bindings lookup; other routing inputs are payload-derived.
@@ -227,7 +256,7 @@ export const buildTelegramMessageContext = async ({
     cfg: freshCfg,
     accountId: account.accountId,
     chatId,
-    isGroup,
+    isGroup: effectiveIsGroup,
     resolvedThreadId,
     replyThreadId,
     senderId,
@@ -242,7 +271,7 @@ export const buildTelegramMessageContext = async ({
   const isNamedAccountFallback = requiresExplicitAccountBinding(route);
   // Named-account groups still require an explicit binding; DMs get a
   // per-account fallback session key below to preserve isolation.
-  if (isNamedAccountFallback && isGroup) {
+  if (isNamedAccountFallback && effectiveIsGroup) {
     logInboundDrop({
       log: logVerbose,
       channel: "telegram",
@@ -265,7 +294,7 @@ export const buildTelegramMessageContext = async ({
   const hasGroupAllowOverride = groupAllowOverride !== undefined;
   const senderUsername = msg.from?.username ?? "";
   const baseAccess = evaluateTelegramGroupBaseAccess({
-    isGroup,
+    isGroup: effectiveIsGroup,
     groupConfig,
     topicConfig,
     hasGroupAllowOverride,
@@ -287,7 +316,7 @@ export const buildTelegramMessageContext = async ({
       return null;
     }
     logVerbose(
-      isGroup
+      effectiveIsGroup
         ? `Blocked telegram group sender ${senderId || "unknown"} (group allowFrom override)`
         : `Blocked telegram DM sender ${senderId || "unknown"} (DM allowFrom override)`,
     );
@@ -295,7 +324,8 @@ export const buildTelegramMessageContext = async ({
   }
 
   const requireTopic = directConfig?.requireTopic;
-  const topicRequiredButMissing = !isGroup && requireTopic === true && dmThreadId == null;
+  const topicRequiredButMissing =
+    !effectiveIsGroup && requireTopic === true && effectiveDmThreadId == null;
   if (topicRequiredButMissing) {
     logVerbose(`Blocked telegram DM ${chatId}: requireTopic=true but no topic present`);
     return null;
@@ -331,7 +361,7 @@ export const buildTelegramMessageContext = async ({
 
   if (
     !(await enforceTelegramDmAccess({
-      isGroup,
+      isGroup: effectiveIsGroup,
       dmPolicy: effectiveDmPolicy,
       msg,
       chatId,
@@ -377,13 +407,18 @@ export const buildTelegramMessageContext = async ({
     cfg: freshCfg,
     route,
     chatId,
-    isGroup,
+    isGroup: effectiveIsGroup,
     senderId,
   });
-  // DMs: use thread suffix for session isolation (works regardless of dmScope)
+  // DMs: use thread suffix for session isolation (works regardless of dmScope).
+  // For whitelisted-supergroup DM mode this also splits the per-topic histories
+  // the user is asking for.
   const threadKeys =
-    dmThreadId != null
-      ? resolveThreadSessionKeys({ baseSessionKey, threadId: `${chatId}:${dmThreadId}` })
+    effectiveDmThreadId != null
+      ? resolveThreadSessionKeys({
+          baseSessionKey,
+          threadId: `${chatId}:${effectiveDmThreadId}`,
+        })
       : null;
   const sessionKey = threadKeys?.sessionKey ?? baseSessionKey;
   route = {
@@ -423,7 +458,7 @@ export const buildTelegramMessageContext = async ({
     primaryCtx,
     msg,
     allMedia,
-    isGroup,
+    isGroup: effectiveIsGroup,
     chatId,
     accountId: account.accountId,
     senderId,
@@ -462,9 +497,9 @@ export const buildTelegramMessageContext = async ({
       ackReaction &&
       shouldAckReactionGate({
         scope: ackReactionScope,
-        isDirect: !isGroup,
-        isGroup,
-        isMentionableGroup: isGroup,
+        isDirect: !effectiveIsGroup,
+        isGroup: effectiveIsGroup,
+        isMentionableGroup: effectiveIsGroup,
         requireMention: Boolean(requireMention),
         canDetectMention: bodyResult.canDetectMention,
         effectiveWasMentioned: bodyResult.effectiveWasMentioned,
@@ -560,13 +595,13 @@ export const buildTelegramMessageContext = async ({
     msg,
     allMedia,
     replyMedia,
-    isGroup,
+    isGroup: effectiveIsGroup,
     isForum,
     chatId,
     senderId,
     senderUsername,
     resolvedThreadId,
-    dmThreadId,
+    dmThreadId: effectiveDmThreadId,
     threadSpec,
     route,
     rawBody: bodyResult.rawBody,
@@ -592,7 +627,7 @@ export const buildTelegramMessageContext = async ({
     primaryCtx,
     msg,
     chatId,
-    isGroup,
+    isGroup: effectiveIsGroup,
     groupConfig,
     topicConfig,
     resolvedThreadId,

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const sendMessageTelegramMock = vi.fn();
 const pinMessageTelegramMock = vi.fn();
@@ -9,11 +9,19 @@ vi.mock("./send.js", () => ({
 }));
 
 import { telegramOutbound } from "./outbound-adapter.js";
+import {
+  clearAllSupergroupViolationsForTesting,
+  recordSupergroupViolation,
+} from "./supergroup-dm-whitelist.js";
 
 describe("telegramOutbound", () => {
   beforeEach(() => {
     pinMessageTelegramMock.mockReset();
     sendMessageTelegramMock.mockReset();
+  });
+
+  afterEach(() => {
+    clearAllSupergroupViolationsForTesting();
   });
 
   it("forwards mediaLocalRoots in direct media sends", async () => {
@@ -96,6 +104,69 @@ describe("telegramOutbound", () => {
       (sendMessageTelegramMock.mock.calls[1]?.[2] as Record<string, unknown>)?.buttons,
     ).toBeUndefined();
     expect(result).toEqual({ channel: "telegram", messageId: "tg-2", chatId: "12345" });
+  });
+
+  it("prepends a supergroup-DM violation banner to text replies for chats with a recorded violation", async () => {
+    sendMessageTelegramMock.mockResolvedValueOnce({ messageId: "tg-banner-1" });
+    recordSupergroupViolation({
+      entry: { chatId: "-1001234567890", userId: "99887766", threadIds: [7] },
+      reason: "unauthorized-sender",
+      violatorId: "31415",
+      violatorThreadId: 7,
+      nowMs: 1700000000000,
+    });
+
+    await telegramOutbound.sendText!({
+      cfg: {} as never,
+      to: "telegram:-1001234567890:topic:7",
+      text: "hello world",
+      accountId: "ops",
+      deps: { sendTelegram: sendMessageTelegramMock },
+    });
+
+    const sentText = sendMessageTelegramMock.mock.calls[0]?.[1] as string;
+    expect(sentText.startsWith("⚠️")).toBe(true);
+    expect(sentText).toContain("non-whitelisted sender");
+    expect(sentText).toContain("hello world");
+  });
+
+  it("does not prepend a banner when no violation is recorded", async () => {
+    sendMessageTelegramMock.mockResolvedValueOnce({ messageId: "tg-clean" });
+
+    await telegramOutbound.sendText!({
+      cfg: {} as never,
+      to: "telegram:-1001234567890:topic:7",
+      text: "hello world",
+      accountId: "ops",
+      deps: { sendTelegram: sendMessageTelegramMock },
+    });
+
+    expect(sendMessageTelegramMock.mock.calls[0]?.[1]).toBe("hello world");
+  });
+
+  it("prepends a banner to payload sends as well", async () => {
+    sendMessageTelegramMock.mockResolvedValueOnce({ messageId: "tg-payload-1", chatId: "12345" });
+    recordSupergroupViolation({
+      entry: { chatId: "-9000", userId: "1" },
+      reason: "unauthorized-topic",
+      violatorId: "1",
+      violatorThreadId: 999,
+      nowMs: 0,
+    });
+
+    await telegramOutbound.sendPayload!({
+      cfg: {} as never,
+      to: "telegram:-9000",
+      text: "",
+      payload: { text: "Approval required" },
+      accountId: "ops",
+      deps: { sendTelegram: sendMessageTelegramMock },
+    });
+
+    const sentText = sendMessageTelegramMock.mock.calls[0]?.[1] as string;
+    expect(sentText.startsWith("⚠️")).toBe(true);
+    expect(sentText).toContain("unauthorized topic");
+    expect(sentText).toContain("Approval required");
   });
 
   it("passes delivery pin notify requests to Telegram pinning", async () => {
