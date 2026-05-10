@@ -1,0 +1,125 @@
+name: Private Release (GH Packages)
+
+# Publishes @9atatimer/openclaw to GitHub Packages on every push to the
+# long-lived deploy branch. Each push gets a unique pre-release version
+# (<base>-preprod.<run_number>) with dist-tag `preprod`. The `prod` dist-tag
+# is owned by a separate manual promote workflow / by bitbot — never set here.
+#
+# Branch contract: this fork stays on the 4.23 baseline. Upstream main
+# (post-4.23) is intentionally not synced; cherry-picks happen by hand.
+
+on:
+  push:
+    branches:
+      - feature/telegram-group-memory
+  workflow_dispatch:
+    inputs:
+      dist_tag:
+        description: npm dist-tag to publish under
+        required: true
+        default: preprod
+        type: choice
+        options:
+          - preprod
+      reason:
+        description: Optional note for audit
+        required: false
+        type: string
+
+concurrency:
+  group: private-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "24.x"
+  PNPM_VERSION: "10.32.1"
+  PRIVATE_NPM_SCOPE: "@9atatimer"
+  PRIVATE_NPM_REGISTRY: "https://npm.pkg.github.com"
+
+jobs:
+  publish:
+    name: Publish to GH Packages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Setup Node environment
+        uses: ./.github/actions/setup-node-env
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          pnpm-version: ${{ env.PNPM_VERSION }}
+          install-bun: "true"
+
+      - name: Resolve dist-tag
+        id: dist
+        env:
+          INPUT_TAG: ${{ github.event.inputs.dist_tag }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-preprod}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure GH Packages auth
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          {
+            echo "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}"
+            echo "${PRIVATE_NPM_SCOPE}:registry=${PRIVATE_NPM_REGISTRY}"
+            echo "always-auth=true"
+          } > "$HOME/.npmrc"
+          chmod 600 "$HOME/.npmrc"
+
+      - name: Typecheck (prod graphs)
+        env:
+          OPENCLAW_LOCAL_CHECK: "0"
+        run: pnpm tsgo:prod
+
+      - name: Rewrite package.json for private publish
+        env:
+          PRIVATE_NPM_SCOPE: ${{ env.PRIVATE_NPM_SCOPE }}
+          PRIVATE_NPM_REGISTRY: ${{ env.PRIVATE_NPM_REGISTRY }}
+          PRIVATE_NPM_DIST_TAG: ${{ steps.dist.outputs.tag }}
+          PRIVATE_NPM_BUILD_LABEL: ${{ steps.dist.outputs.tag }}.${{ github.run_number }}
+        run: node scripts/rewrite-package-for-private-publish.mjs
+
+      - name: Show resolved publish identity
+        run: |
+          node -e "const p=require('./package.json'); console.log(JSON.stringify({name:p.name, version:p.version, publishConfig:p.publishConfig}, null, 2));"
+
+      - name: Publish to GH Packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # `pnpm publish` runs the package's `prepack` script, which builds
+          # core (`pnpm build`) and the Control UI (`pnpm ui:build`) and
+          # writes the dist-inventory before packing.
+          pnpm publish \
+            --no-git-checks \
+            --tag "${{ steps.dist.outputs.tag }}" \
+            --registry "${PRIVATE_NPM_REGISTRY}"
+
+      - name: Summarize published artifact
+        if: success()
+        env:
+          DIST_TAG: ${{ steps.dist.outputs.tag }}
+        run: |
+          set -euo pipefail
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          {
+            echo "### Published to GitHub Packages"
+            echo
+            echo "- package: \`${NAME}\`"
+            echo "- version: \`${VERSION}\`"
+            echo "- dist-tag: \`${DIST_TAG}\`"
+            echo "- registry: ${PRIVATE_NPM_REGISTRY}"
+          } >> "$GITHUB_STEP_SUMMARY"

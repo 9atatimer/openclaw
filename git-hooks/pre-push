@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Refuses any push whose target remote is the OSS upstream repository.
+# This fork (9atatimer/openclaw) deliberately diverges from upstream, so
+# accidentally pushing to openclaw/openclaw is always a mistake.
+#
+# Bypass for an emergency: `git push --no-verify` (we don't want a knob; this
+# hook should be loud enough that the bypass is intentional).
+
+set -euo pipefail
+
+remote_name="${1:-}"
+remote_url="${2:-}"
+
+if [[ "${OPENCLAW_ALLOW_UPSTREAM_PUSH:-0}" == "1" ]]; then
+  exit 0
+fi
+
+case "${remote_url}" in
+  *github.com[:/]openclaw/openclaw*)
+    cat >&2 <<EOF
+pre-push: refusing to push to OSS upstream (openclaw/openclaw).
+  remote name : ${remote_name}
+  remote url  : ${remote_url}
+This fork is the wrong source for upstream contributions. If you genuinely
+want to push to upstream, set OPENCLAW_ALLOW_UPSTREAM_PUSH=1 for the command:
+  OPENCLAW_ALLOW_UPSTREAM_PUSH=1 git push ${remote_name} ...
+EOF
+    exit 1
+    ;;
+esac
+
+exit 0
