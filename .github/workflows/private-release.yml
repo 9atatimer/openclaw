@@ -1,17 +1,19 @@
 name: Private Release (GH Packages)
 
-# Publishes @9atatimer/openclaw to GitHub Packages on every push to the
-# long-lived deploy branch. Each push gets a unique pre-release version
-# (<base>-preprod.<run_number>) with dist-tag `preprod`. The `prod` dist-tag
-# is owned by a separate manual promote workflow / by bitbot — never set here.
+# MANUAL ESCAPE HATCH ONLY. Routine publishes happen LOCALLY via the pre-push
+# hook (see git-hooks/pre-push and scripts/publish-private-package.sh), which
+# burns zero GitHub Actions minutes. This workflow exists so a publish can
+# still be triggered from the web UI or `gh workflow run` if the local
+# machine is unavailable. There is no `push:` trigger on purpose.
+#
+# Each run gets a unique pre-release version (<base>-preprod.<run_number>)
+# with dist-tag `preprod`. The `prod` dist-tag is promoted separately by
+# bitbot — never set here.
 #
 # Branch contract: this fork stays on the 4.23 baseline. Upstream main
 # (post-4.23) is intentionally not synced; cherry-picks happen by hand.
 
 on:
-  push:
-    branches:
-      - feature/telegram-group-memory
   workflow_dispatch:
     inputs:
       dist_tag:

@@ -1,23 +1,22 @@
 #!/usr/bin/env bash
-# Refuses any push whose target remote is the OSS upstream repository.
-# This fork (9atatimer/openclaw) deliberately diverges from upstream, so
-# accidentally pushing to openclaw/openclaw is always a mistake.
-#
-# Bypass for an emergency: `git push --no-verify` (we don't want a knob; this
-# hook should be loud enough that the bypass is intentional).
+# Two-stage pre-push:
+#   1. Refuse pushes whose target remote is the OSS upstream (openclaw/openclaw).
+#      Bypass: OPENCLAW_ALLOW_UPSTREAM_PUSH=1 git push ...
+#   2. On push to feature/telegram-group-memory: build openclaw and publish
+#      @9atatimer/openclaw to GitHub Packages BEFORE the push lands. If the
+#      build or publish fails, the push is aborted.
+#      Bypass: SKIP_PRIVATE_PUBLISH=1 git push ...
 
 set -euo pipefail
 
 remote_name="${1:-}"
 remote_url="${2:-}"
 
-if [[ "${OPENCLAW_ALLOW_UPSTREAM_PUSH:-0}" == "1" ]]; then
-  exit 0
-fi
-
-case "${remote_url}" in
-  *github.com[:/]openclaw/openclaw*)
-    cat >&2 <<EOF
+# Stage 1: never push to upstream
+if [[ "${OPENCLAW_ALLOW_UPSTREAM_PUSH:-0}" != "1" ]]; then
+  case "${remote_url}" in
+    *github.com[:/]openclaw/openclaw*)
+      cat >&2 <<EOF
 pre-push: refusing to push to OSS upstream (openclaw/openclaw).
   remote name : ${remote_name}
   remote url  : ${remote_url}
@@ -25,8 +24,30 @@ This fork is the wrong source for upstream contributions. If you genuinely
 want to push to upstream, set OPENCLAW_ALLOW_UPSTREAM_PUSH=1 for the command:
   OPENCLAW_ALLOW_UPSTREAM_PUSH=1 git push ${remote_name} ...
 EOF
-    exit 1
-    ;;
-esac
+      exit 1
+      ;;
+  esac
+fi
 
-exit 0
+# Stage 2: publish on push to the long-lived deploy branch
+PUBLISH_BRANCH="refs/heads/feature/telegram-group-memory"
+ZERO_SHA="0000000000000000000000000000000000000000"
+publish_sha=""
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [[ "${remote_ref}" == "${PUBLISH_BRANCH}" && "${local_sha}" != "${ZERO_SHA}" ]]; then
+    publish_sha="${local_sha}"
+  fi
+done
+
+if [[ -z "${publish_sha}" ]]; then
+  exit 0
+fi
+
+if [[ "${SKIP_PRIVATE_PUBLISH:-0}" == "1" ]]; then
+  echo "pre-push: SKIP_PRIVATE_PUBLISH=1 set, skipping private publish step."
+  exit 0
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+exec "${repo_root}/scripts/publish-private-package.sh" "${publish_sha}"
