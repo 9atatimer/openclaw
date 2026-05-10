@@ -70,10 +70,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # Auth is scoped to npm.pkg.github.com via the registry-specific
+          # _authToken. The fork's @9atatimer scope routes there; the default
+          # registry stays npmjs.org and is reached anonymously, which is what
+          # the bundled-plugin runtime closure (e.g. amazon-bedrock's AWS SDK
+          # deps) needs. Do NOT add `always-auth=true` — it forces auth on the
+          # default registry too, which has no token and 401s every install.
           {
             echo "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}"
             echo "${PRIVATE_NPM_SCOPE}:registry=${PRIVATE_NPM_REGISTRY}"
-            echo "always-auth=true"
+            echo "${PRIVATE_NPM_SCOPE}:always-auth=true"
           } > "$HOME/.npmrc"
           chmod 600 "$HOME/.npmrc"
 
