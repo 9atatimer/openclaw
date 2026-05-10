@@ -75,6 +75,18 @@ chmod 600 "$NPMRC"
 echo "publish-private-package: typechecking..."
 OPENCLAW_LOCAL_CHECK=0 OPENCLAW_SKIP_BUNDLED_RUNTIME_DEPS="*" pnpm tsgo:prod
 
+echo "publish-private-package: running changed tests..."
+# pnpm test:changed scopes vitest to lanes touched by the diff vs main. For a
+# branch with no source changes (e.g. CI/script-only commits) this is a fast
+# no-op. For real feature work it covers regressions in the touched surface
+# without paying the full-suite cost. Bitbot's pre-prod smoke on RPi catches
+# anything beyond unit-level (integration/runtime). Bypass: SKIP_PRIVATE_PUBLISH_TESTS=1.
+if [[ "${SKIP_PRIVATE_PUBLISH_TESTS:-0}" == "1" ]]; then
+  echo "publish-private-package: SKIP_PRIVATE_PUBLISH_TESTS=1 set, skipping changed-tests gate."
+else
+  OPENCLAW_LOCAL_CHECK=0 OPENCLAW_SKIP_BUNDLED_RUNTIME_DEPS="*" pnpm test:changed
+fi
+
 echo "publish-private-package: building..."
 OPENCLAW_LOCAL_CHECK=0 OPENCLAW_SKIP_BUNDLED_RUNTIME_DEPS="*" pnpm build
 
