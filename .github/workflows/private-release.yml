@@ -35,6 +35,16 @@ env:
   PNPM_VERSION: "10.32.1"
   PRIVATE_NPM_SCOPE: "@9atatimer"
   PRIVATE_NPM_REGISTRY: "https://npm.pkg.github.com"
+  # runtime-postbuild stages each bundled plugin's runtime closure into
+  # dist/extensions/<id>/node_modules so the publisher can preflight it. The
+  # published tarball excludes those node_modules dirs (see package.json
+  # `files`), so the staging never ships — it's publish-time validation only.
+  # Consumers materialize the closure on demand via `openclaw doctor --fix`.
+  # On 4.23 the temp `npm install` fallback fails opaquely under Node 24;
+  # skip the preflight entirely on the private path so a flaky upstream
+  # preflight cannot block publishing the fork. See
+  # scripts/stage-bundled-plugin-runtime-deps.mjs (listBundledPluginRuntimeDirs).
+  OPENCLAW_SKIP_BUNDLED_RUNTIME_DEPS: "*"
 
 jobs:
   publish:

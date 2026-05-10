@@ -632,9 +632,24 @@ function listBundledPluginRuntimeDirs(repoRoot) {
     return [];
   }
 
+  // Fork-private skip hook: lets the private GH Packages publish bypass the
+  // preflight runtime-closure check for bundled plugins the consumer never
+  // loads. The published tarball excludes dist/extensions/*/node_modules/**
+  // anyway, so this staging is publish-time preflight only — the consumer
+  // stages its own runtime closure on demand via `openclaw doctor --fix`.
+  const skipRaw = process.env.OPENCLAW_SKIP_BUNDLED_RUNTIME_DEPS ?? "";
+  const skipAll = skipRaw.trim() === "*";
+  const skipSet = new Set(
+    skipRaw
+      .split(",")
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0 && value !== "*"),
+  );
+
   return fs
     .readdirSync(extensionsRoot, { withFileTypes: true })
     .filter((dirent) => dirent.isDirectory())
+    .filter((dirent) => !(skipAll || skipSet.has(dirent.name)))
     .map((dirent) => path.join(extensionsRoot, dirent.name))
     .filter((pluginDir) => fs.existsSync(path.join(pluginDir, "package.json")));
 }
